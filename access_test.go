@@ -407,6 +407,7 @@ func TestAccessAuthorizationCodePKCE(t *testing.T) {
 		Challenge       string
 		ChallengeMethod string
 		Verifier        string
+		OmitVerifier    bool
 		ExpectedError   string
 	}{
 		"good, plain": {
@@ -428,6 +429,45 @@ func TestAccessAuthorizationCodePKCE(t *testing.T) {
 			ChallengeMethod: "S256",
 			Verifier:        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
 			ExpectedError:   "invalid_grant",
+		},
+		"missing verifier, plain": {
+			Challenge:       "12345678901234567890123456789012345678901234567890",
+			ChallengeMethod: "plain",
+			OmitVerifier:    true,
+			ExpectedError:   "invalid_request",
+		},
+		"missing verifier, S256": {
+			Challenge:       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+			ChallengeMethod: "S256",
+			OmitVerifier:    true,
+			ExpectedError:   "invalid_request",
+		},
+		"missing verifier, legacy method": {
+			Challenge:     "12345678901234567890123456789012345678901234567890",
+			OmitVerifier:  true,
+			ExpectedError: "invalid_request",
+		},
+		"empty verifier, plain": {
+			Challenge:       "12345678901234567890123456789012345678901234567890",
+			ChallengeMethod: "plain",
+			Verifier:        "",
+			ExpectedError:   "invalid_request",
+		},
+		"invalid verifier format": {
+			Challenge:       "12345678901234567890123456789012345678901234567890",
+			ChallengeMethod: "plain",
+			Verifier:        "too-short",
+			ExpectedError:   "invalid_request",
+		},
+		"good, legacy method defaults to plain": {
+			Challenge: "12345678901234567890123456789012345678901234567890",
+			Verifier:  "12345678901234567890123456789012345678901234567890",
+		},
+		"unsupported method": {
+			Challenge:       "12345678901234567890123456789012345678901234567890",
+			ChallengeMethod: "S512",
+			Verifier:        "12345678901234567890123456789012345678901234567890",
+			ExpectedError:   "invalid_request",
 		},
 		"missing from storage": {
 			Challenge:       "",
@@ -464,7 +504,9 @@ func TestAccessAuthorizationCodePKCE(t *testing.T) {
 		req.Form.Set("grant_type", string(AUTHORIZATION_CODE))
 		req.Form.Set("code", "pkce-code")
 		req.Form.Set("state", "a")
-		req.Form.Set("code_verifier", test.Verifier)
+		if !test.OmitVerifier {
+			req.Form.Set("code_verifier", test.Verifier)
+		}
 		req.PostForm = make(url.Values)
 
 		if ar := server.HandleAccessRequest(resp, req); ar != nil {
@@ -477,6 +519,9 @@ func TestAccessAuthorizationCodePKCE(t *testing.T) {
 				t.Errorf("%s: unexpected error: %v, %v", k, resp.ErrorId, resp.StatusText)
 				continue
 			}
+		} else if test.ExpectedError != "" {
+			t.Errorf("%s: expected error %s, got none", k, test.ExpectedError)
+			continue
 		}
 		if test.ExpectedError == "" {
 			if resp.Type != DATA {
