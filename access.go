@@ -212,13 +212,27 @@ func (s *Server) handleAuthorizationCodeRequest(w *Response, r *http.Request) *A
 	if ret.RedirectUri == "" {
 		ret.RedirectUri = FirstUri(ret.Client.GetRedirectUri(), s.Config.RedirectUriSeparator)
 	}
-	if realRedirectUri, err := ValidateUriList(ret.Client.GetRedirectUri(), ret.RedirectUri, s.Config.RedirectUriSeparator); err != nil {
+	realRedirectUri, matchedBaseUri, err := ValidateUriListWithBase(ret.Client.GetRedirectUri(), ret.RedirectUri, s.Config.RedirectUriSeparator)
+	if err != nil {
 		s.setErrorAndLog(w, E_INVALID_REQUEST, err, "auth_code_request=%s", "error validating client redirect")
 		return nil
-	} else {
-		ret.RedirectUri = realRedirectUri
 	}
-	if ret.AuthorizeData.RedirectUri != ret.RedirectUri {
+	ret.RedirectUri = realRedirectUri
+
+	// Re-check the redirect against the exact registered entry that was
+	// selected during authorization. This uses the same normalization-aware
+	// predicate as the authorization endpoint, so equivalent spellings
+	// (mixed case host/scheme, implicit default port, trailing slash) no
+	// longer fail here after having passed authorization.
+	if ret.AuthorizeData.RedirectBaseUri != "" {
+		if matchedBaseUri != ret.AuthorizeData.RedirectBaseUri ||
+			!SameRedirectUri(ret.AuthorizeData.RedirectBaseUri, ret.RedirectUri) {
+			s.setErrorAndLog(w, E_INVALID_REQUEST, errors.New("Redirect uri is different"), "auth_code_request=%s", "client redirect does not match authorization data")
+			return nil
+		}
+	} else if !SameRedirectUri(ret.AuthorizeData.RedirectUri, ret.RedirectUri) {
+		// Authorization data written before the matched base was persisted:
+		// validate against the stored redirect using the shared predicate.
 		s.setErrorAndLog(w, E_INVALID_REQUEST, errors.New("Redirect uri is different"), "auth_code_request=%s", "client redirect does not match authorization data")
 		return nil
 	}

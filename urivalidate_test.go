@@ -108,6 +108,42 @@ func TestURIValidate(t *testing.T) {
 			"http://[0:0:0:0:0:0:0:1]/callback",
 			"http://[0:0:0:0:0:0:0:1]/callback",
 		},
+		{
+			"Uppercase host",
+			"http://example.com/callback",
+			"http://EXAMPLE.COM/callback",
+			"http://example.com/callback",
+		},
+		{
+			"Uppercase scheme",
+			"http://example.com/callback",
+			"HTTP://example.com/callback",
+			"http://example.com/callback",
+		},
+		{
+			"Explicit default http port",
+			"http://example.com/callback",
+			"http://example.com:80/callback",
+			"http://example.com/callback",
+		},
+		{
+			"Explicit default https port",
+			"https://example.com/callback",
+			"https://example.com:443/callback",
+			"https://example.com/callback",
+		},
+		{
+			"Default port on the registered uri",
+			"https://example.com:443/callback",
+			"https://example.com/callback",
+			"https://example.com/callback",
+		},
+		{
+			"Normalized loopback keeps the requested path spelling",
+			"http://127.0.0.1/callback",
+			"http://127.0.0.1:8081/callback/",
+			"http://127.0.0.1:8081/callback/",
+		},
 	}
 	for _, v := range valid {
 		t.Run(fmt.Sprintf("valid/%s", v.name), func(t *testing.T) {
@@ -199,6 +235,16 @@ func TestURIValidate(t *testing.T) {
 			"http://127.0.0.1/callback",
 			"http://example.com/callback",
 		},
+		{
+			"Non-default ports still mismatch",
+			"http://example.com:8080/callback",
+			"http://example.com:9090/callback",
+		},
+		{
+			"Default port does not make an explicit non-default port equivalent",
+			"http://example.com:8080/callback",
+			"http://example.com:80/callback",
+		},
 	}
 	for _, v := range invalid {
 		t.Run(fmt.Sprintf("invalid/%s", v.name), func(t *testing.T) {
@@ -228,5 +274,63 @@ func TestURIListValidate(t *testing.T) {
 	// V4
 	if _, err := ValidateUriList("http://xxx:14000/appauth;http://localhost:14000/appauth", "http://localhost:14000/app", ";"); err == nil {
 		t.Error("V4 should have failed")
+	}
+}
+
+func TestValidateUriListWithBaseReturnsMatchedBase(t *testing.T) {
+	list := "https://a.example.com/cb;https://b.example.com/cb"
+
+	real, base, err := ValidateUriListWithBase(list, "https://b.example.com/cb", ";")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if base != "https://b.example.com/cb" {
+		t.Fatalf("expected matched base to be the second entry, got %q", base)
+	}
+	if real != "https://b.example.com/cb" {
+		t.Fatalf("unexpected normalized redirect uri: %q", real)
+	}
+
+	// spacing around the separator must not change which base is selected
+	real, base, err = ValidateUriListWithBase(
+		"https://a.example.com/cb ; https://b.example.com/cb",
+		"https://B.example.com/cb", ";")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if base != "https://b.example.com/cb" {
+		t.Fatalf("expected trimmed matched base, got %q", base)
+	}
+	if real != "https://b.example.com/cb" {
+		t.Fatalf("expected normalized host, got %q", real)
+	}
+
+	if _, _, err := ValidateUriListWithBase(list, "https://c.example.com/cb", ";"); err == nil {
+		t.Fatal("expected an error for a redirect that matches no base")
+	}
+}
+
+func TestSameRedirectUri(t *testing.T) {
+	equivalent := [][2]string{
+		{"http://example.com/cb", "http://EXAMPLE.COM/cb"},
+		{"https://example.com/cb", "https://example.com:443/cb"},
+		{"http://www.google.com/myapp", "http://www.google.com/myapp/"},
+		{"http://127.0.0.1/callback", "http://127.0.0.1:8081/callback"},
+	}
+	for _, pair := range equivalent {
+		if !SameRedirectUri(pair[0], pair[1]) {
+			t.Errorf("expected SameRedirectUri(%q, %q) to be true", pair[0], pair[1])
+		}
+	}
+
+	different := [][2]string{
+		{"http://example.com/cb", "https://example.com/cb"},
+		{"http://example.com/cb", "http://other.com/cb"},
+		{"http://example.com:8080/cb", "http://example.com:9090/cb"},
+	}
+	for _, pair := range different {
+		if SameRedirectUri(pair[0], pair[1]) {
+			t.Errorf("expected SameRedirectUri(%q, %q) to be false", pair[0], pair[1])
+		}
 	}
 }

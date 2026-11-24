@@ -28,7 +28,11 @@ type AuthorizeRequest struct {
 	Client      Client
 	Scope       string
 	RedirectUri string
-	State       string
+
+	// The registered redirect URI that RedirectUri matched against. Kept in
+	// sync with the value persisted on the authorization data.
+	RedirectBaseUri string
+	State           string
 
 	// Set if request is authorized
 	Authorized bool
@@ -65,6 +69,12 @@ type AuthorizeData struct {
 
 	// Redirect Uri from request
 	RedirectUri string
+
+	// The registered redirect URI that RedirectUri matched against. A client
+	// may register several comma/separator-delimited callbacks; recording the
+	// one selected during authorization lets the token endpoint re-check the
+	// callback against the exact same entry instead of guessing.
+	RedirectBaseUri string
 
 	// State data from request
 	State string
@@ -148,13 +158,14 @@ func (s *Server) HandleAuthorizeRequest(w *Response, r *http.Request) *Authorize
 		ret.RedirectUri = FirstUri(ret.Client.GetRedirectUri(), s.Config.RedirectUriSeparator)
 	}
 
-	if realRedirectUri, err := ValidateUriList(ret.Client.GetRedirectUri(), ret.RedirectUri, s.Config.RedirectUriSeparator); err != nil {
+	realRedirectUri, matchedBaseUri, err := ValidateUriListWithBase(ret.Client.GetRedirectUri(), ret.RedirectUri, s.Config.RedirectUriSeparator)
+	if err != nil {
 		w.SetErrorState(E_INVALID_REQUEST, "", ret.State)
 		w.InternalError = err
 		return nil
-	} else {
-		ret.RedirectUri =  realRedirectUri
 	}
+	ret.RedirectUri = realRedirectUri
+	ret.RedirectBaseUri = matchedBaseUri
 
 	w.SetRedirect(ret.RedirectUri)
 
@@ -238,13 +249,14 @@ func (s *Server) FinishAuthorizeRequest(w *Response, r *http.Request, ar *Author
 		} else {
 			// generate authorization token
 			ret := &AuthorizeData{
-				Client:      ar.Client,
-				CreatedAt:   s.Now(),
-				ExpiresIn:   ar.Expiration,
-				RedirectUri: ar.RedirectUri,
-				State:       ar.State,
-				Scope:       ar.Scope,
-				UserData:    ar.UserData,
+				Client:          ar.Client,
+				CreatedAt:       s.Now(),
+				ExpiresIn:       ar.Expiration,
+				RedirectUri:     ar.RedirectUri,
+				RedirectBaseUri: ar.RedirectBaseUri,
+				State:           ar.State,
+				Scope:           ar.Scope,
+				UserData:        ar.UserData,
 				// Optional PKCE challenge
 				CodeChallenge:       ar.CodeChallenge,
 				CodeChallengeMethod: ar.CodeChallengeMethod,

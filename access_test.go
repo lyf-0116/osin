@@ -54,6 +54,151 @@ func TestAccessAuthorizationCode(t *testing.T) {
 	}
 }
 
+// TestAuthorizationCodeRedirectUriConsistency covers the case where the
+// authorization and token endpoints previously applied different redirect
+// semantics: authorization accepted a normalized match while the token
+// endpoint demanded a raw string equality, producing a spurious
+// "Redirect uri is different" error. It also verifies that with several
+// registered callbacks the entry selected during authorization is carried
+// with the authorization code and re-used during token exchange.
+func TestAuthorizationCodeRedirectUriConsistency(t *testing.T) {
+	testcases := map[string]struct {
+		registeredUris string
+		authorizeUri   string
+		tokenUri       string
+		expectMatched  string
+		expectError    bool
+	}{
+		"uppercase host accepted at both phases": {
+			registeredUris: "http://example.com/callback",
+			authorizeUri:   "http://EXAMPLE.COM/callback",
+			tokenUri:       "http://example.com/callback",
+			expectMatched:  "http://example.com/callback",
+		},
+		"implicit default port accepted at both phases": {
+			registeredUris: "https://example.com/callback",
+			authorizeUri:   "https://example.com/callback",
+			tokenUri:       "https://example.com:443/callback",
+			expectMatched:  "https://example.com/callback",
+		},
+		"trailing slash accepted at both phases": {
+			registeredUris: "http://example.com/callback",
+			authorizeUri:   "http://example.com/callback/",
+			tokenUri:       "http://example.com/callback",
+			expectMatched:  "http://example.com/callback",
+		},
+		"second registered callback is selected and re-used": {
+			registeredUris: "http://a.example.com/callback;http://b.example.com/callback",
+			authorizeUri:   "http://b.example.com/callback",
+			tokenUri:       "http://B.example.com/callback",
+			expectMatched:  "http://b.example.com/callback",
+		},
+		"callback registered on a different entry is rejected": {
+			registeredUris: "http://a.example.com/callback;http://b.example.com/callback",
+			authorizeUri:   "http://a.example.com/callback",
+			tokenUri:       "http://b.example.com/callback",
+			expectMatched:  "http://a.example.com/callback",
+			expectError:    true,
+		},
+		"unregistered host is rejected at token exchange": {
+			registeredUris: "http://example.com/callback",
+			authorizeUri:   "http://example.com/callback",
+			tokenUri:       "http://evil.example.com/callback",
+			expectMatched:  "http://example.com/callback",
+			expectError:    true,
+		},
+	}
+
+	for name, test := range testcases {
+		t.Run(name, func(t *testing.T) {
+			storage := NewTestingStorage()
+			client := &DefaultClient{
+				Id:          "multi",
+				Secret:      "secret",
+				RedirectUri: test.registeredUris,
+			}
+			if err := storage.SetClient(client.Id, client); err != nil {
+				t.Fatal(err)
+			}
+
+			sconfig := NewServerConfig()
+			sconfig.AllowedAuthorizeTypes = AllowedAuthorizeType{CODE}
+			sconfig.AllowedAccessTypes = AllowedAccessType{AUTHORIZATION_CODE}
+			sconfig.RedirectUriSeparator = ";"
+			server := NewServer(sconfig, storage)
+			server.AuthorizeTokenGen = &TestingAuthorizeTokenGen{}
+			server.AccessTokenGen = &TestingAccessTokenGen{}
+
+			// authorization phase
+			authResp := server.NewResponse()
+			authReq, err := http.NewRequest("GET", "http://localhost/authorize", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authReq.Form = url.Values{
+				"response_type": {string(CODE)},
+				"client_id":     {client.Id},
+				"state":         {"state"},
+				"redirect_uri":  {test.authorizeUri},
+			}
+			ar := server.HandleAuthorizeRequest(authResp, authReq)
+			if ar == nil {
+				t.Fatalf("authorization request rejected: %v", authResp.InternalError)
+			}
+			ar.Authorized = true
+			server.FinishAuthorizeRequest(authResp, authReq, ar)
+			if authResp.IsError {
+				t.Fatalf("authorization failed: %v", authResp.InternalError)
+			}
+
+			code, ok := authResp.Output["code"].(string)
+			if !ok || code == "" {
+				t.Fatalf("missing authorization code: %#v", authResp.Output)
+			}
+
+			stored, err := storage.LoadAuthorize(code)
+			if err != nil {
+				t.Fatalf("loading authorization data: %v", err)
+			}
+			if stored.RedirectBaseUri != test.expectMatched {
+				t.Fatalf("expected stored base %q, got %q", test.expectMatched, stored.RedirectBaseUri)
+			}
+
+			// token exchange phase
+			tokenResp := server.NewResponse()
+			tokenReq, err := http.NewRequest("POST", "http://localhost/token", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tokenReq.SetBasicAuth(client.Id, client.Secret)
+			tokenReq.Form = url.Values{
+				"grant_type":   {string(AUTHORIZATION_CODE)},
+				"code":         {code},
+				"redirect_uri": {test.tokenUri},
+			}
+			tokenReq.PostForm = url.Values{}
+
+			if accessReq := server.HandleAccessRequest(tokenResp, tokenReq); accessReq != nil {
+				accessReq.Authorized = true
+				server.FinishAccessRequest(tokenResp, tokenReq, accessReq)
+			}
+
+			if test.expectError {
+				if !tokenResp.IsError || tokenResp.ErrorId != E_INVALID_REQUEST {
+					t.Fatalf("expected invalid_request error, got %#v", tokenResp)
+				}
+				return
+			}
+			if tokenResp.IsError {
+				t.Fatalf("token exchange failed: %v", tokenResp.InternalError)
+			}
+			if tokenResp.Type != DATA {
+				t.Fatalf("expected token data response, got %v", tokenResp.Type)
+			}
+		})
+	}
+}
+
 func TestAccessRefreshToken(t *testing.T) {
 	sconfig := NewServerConfig()
 	sconfig.AllowedAccessTypes = AllowedAccessType{REFRESH_TOKEN}
