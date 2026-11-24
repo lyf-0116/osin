@@ -10,6 +10,11 @@ var (
 	// client is not found. All other returned errors must be treated as storage-specific errors,
 	// like "connection lost", "connection refused", etc.
 	ErrNotFound = errors.New("Entity not found")
+
+	// ErrRefreshTokenRotated is the error returned by Storage RotateRefresh when the
+	// refresh token has already been rotated (or its rotation sequence does not match),
+	// meaning the token was replayed or concurrently refreshed.
+	ErrRefreshTokenRotated = errors.New("Refresh token already rotated")
 )
 
 // Storage interface
@@ -56,4 +61,14 @@ type Storage interface {
 
 	// RemoveRefresh revokes or deletes refresh AccessData.
 	RemoveRefresh(token string) error
+
+	// RotateRefresh atomically marks the refresh token as rotated, but only if its
+	// current rotation sequence still equals sequence. It must return
+	// ErrRefreshTokenRotated if the token was already rotated or the sequence does
+	// not match, so that concurrent refreshes of the same token cannot both succeed.
+	RotateRefresh(token string, sequence int64) error
+
+	// RemoveRefreshFamily revokes or deletes all access and refresh tokens
+	// belonging to the given refresh token family.
+	RemoveRefreshFamily(family string) error
 }

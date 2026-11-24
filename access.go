@@ -88,6 +88,19 @@ type AccessData struct {
 
 	// Data to be passed to storage. Not used by the library.
 	UserData interface{}
+
+	// RefreshTokenFamily identifies the refresh token family this grant belongs
+	// to. All tokens rotated out of the same initial grant share the family, so
+	// the whole family can be revoked when token reuse is detected.
+	RefreshTokenFamily string
+
+	// RefreshTokenRotation is the rotation sequence of this refresh token
+	// within its family, incremented on every refresh.
+	RefreshTokenRotation int64
+
+	// RefreshTokenRotated is true when this refresh token has been rotated
+	// (replaced by a newer one) and must no longer be accepted.
+	RefreshTokenRotated bool
 }
 
 // IsExpired returns true if access expired
@@ -338,6 +351,18 @@ func (s *Server) handleRefreshTokenRequest(w *Response, r *http.Request) *Access
 
 	}
 
+	// a rotated refresh token must never be accepted again: its reuse means
+	// the token was leaked and replayed, so revoke the entire token family
+	if ret.AccessData.RefreshTokenRotated {
+		if ret.AccessData.RefreshTokenFamily != "" {
+			w.Storage.RemoveRefreshFamily(ret.AccessData.RefreshTokenFamily)
+		} else {
+			w.Storage.RemoveRefresh(ret.Code)
+		}
+		s.setErrorAndLog(w, E_INVALID_GRANT, errors.New("Rotated refresh token reused"), "refresh_token=%s", "rotated refresh token reused, family revoked")
+		return nil
+	}
+
 	// set rest of data
 	ret.RedirectUri = ret.AccessData.RedirectUri
 	ret.UserData = ret.AccessData.UserData
@@ -478,6 +503,17 @@ func (s *Server) FinishAccessRequest(w *Response, r *http.Request, ar *AccessReq
 				Scope:         ar.Scope,
 			}
 
+			// carry the refresh token family over to the new token, bumping the
+			// rotation sequence; start a new family for first-time grants
+			if ar.GenerateRefresh {
+				if ar.AccessData != nil && ar.AccessData.RefreshTokenFamily != "" {
+					ret.RefreshTokenFamily = ar.AccessData.RefreshTokenFamily
+					ret.RefreshTokenRotation = ar.AccessData.RefreshTokenRotation + 1
+				} else {
+					ret.RefreshTokenFamily = newRefreshTokenFamily()
+				}
+			}
+
 			// generate access token
 			ret.AccessToken, ret.RefreshToken, err = s.AccessTokenGen.GenerateAccessToken(ret, ar.GenerateRefresh)
 			if err != nil {
@@ -486,6 +522,25 @@ func (s *Server) FinishAccessRequest(w *Response, r *http.Request, ar *AccessReq
 			}
 		} else {
 			ret = ar.ForceAccessData
+		}
+
+		// rotate the previous refresh token before saving the new one. The
+		// sequence comparison must be atomic so that two concurrent refreshes
+		// of the same token cannot both succeed.
+		if ret.AccessData != nil && ret.AccessData.RefreshToken != "" && !s.Config.RetainTokenAfterRefresh {
+			if err = w.Storage.RotateRefresh(ret.AccessData.RefreshToken, ret.AccessData.RefreshTokenRotation); err != nil {
+				if err == ErrRefreshTokenRotated {
+					// the old token was already rotated: replay or concurrent
+					// refresh, revoke the whole family
+					if ret.AccessData.RefreshTokenFamily != "" {
+						w.Storage.RemoveRefreshFamily(ret.AccessData.RefreshTokenFamily)
+					}
+					s.setErrorAndLog(w, E_INVALID_GRANT, err, "finish_access_request=%s", "refresh token reuse detected, family revoked")
+					return
+				}
+				s.setErrorAndLog(w, E_SERVER_ERROR, err, "finish_access_request=%s", "error rotating refresh token")
+				return
+			}
 		}
 
 		// save access token
@@ -499,11 +554,9 @@ func (s *Server) FinishAccessRequest(w *Response, r *http.Request, ar *AccessReq
 			w.Storage.RemoveAuthorize(ret.AuthorizeData.Code)
 		}
 
-		// remove previous access token
+		// remove previous access token (the previous refresh token was already
+		// rotated above and is kept around to detect reuse)
 		if ret.AccessData != nil && !s.Config.RetainTokenAfterRefresh {
-			if ret.AccessData.RefreshToken != "" {
-				w.Storage.RemoveRefresh(ret.AccessData.RefreshToken)
-			}
 			w.Storage.RemoveAccess(ret.AccessData.AccessToken)
 		}
 

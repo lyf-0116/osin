@@ -79,8 +79,12 @@ func TestAccessRefreshToken(t *testing.T) {
 	}
 	//fmt.Printf("%+v", resp)
 
-	if _, err := server.Storage.LoadRefresh("r9999"); err == nil {
-		t.Fatalf("token was not deleted")
+	old, err := server.Storage.LoadRefresh("r9999")
+	if err != nil {
+		t.Fatalf("rotated token should be retained for reuse detection: %s", err.Error())
+	}
+	if !old.RefreshTokenRotated {
+		t.Fatalf("token was not marked as rotated")
 	}
 
 	if resp.IsError && resp.InternalError != nil {
@@ -101,6 +105,92 @@ func TestAccessRefreshToken(t *testing.T) {
 
 	if d := resp.Output["refresh_token"]; d != "r1" {
 		t.Fatalf("Unexpected refresh token: %s", d)
+	}
+
+	// the new token must inherit the family and bump the rotation sequence
+	newData, err := server.Storage.LoadRefresh("r1")
+	if err != nil {
+		t.Fatalf("new refresh token not found: %s", err.Error())
+	}
+	if newData.RefreshTokenFamily != old.RefreshTokenFamily {
+		t.Fatalf("family not carried over: %q != %q", newData.RefreshTokenFamily, old.RefreshTokenFamily)
+	}
+	if newData.RefreshTokenRotation != old.RefreshTokenRotation+1 {
+		t.Fatalf("rotation sequence not incremented: %d", newData.RefreshTokenRotation)
+	}
+	if newData.RefreshTokenRotated {
+		t.Fatalf("new token must not be rotated")
+	}
+}
+
+func TestAccessRefreshTokenReuseRevokesFamily(t *testing.T) {
+	sconfig := NewServerConfig()
+	sconfig.AllowedAccessTypes = AllowedAccessType{REFRESH_TOKEN}
+	server := NewServer(sconfig, NewTestingStorage())
+	server.AccessTokenGen = &TestingAccessTokenGen{}
+
+	newRefreshRequest := func() *http.Request {
+		req, err := http.NewRequest("POST", "http://localhost:14000/appauth", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.SetBasicAuth("1234", "aabbccdd")
+		req.Form = make(url.Values)
+		req.Form.Set("grant_type", string(REFRESH_TOKEN))
+		req.Form.Set("refresh_token", "r9999")
+		req.PostForm = make(url.Values)
+		return req
+	}
+
+	// first refresh rotates r9999 and issues r1
+	resp := server.NewResponse()
+	req := newRefreshRequest()
+	if ar := server.HandleAccessRequest(resp, req); ar != nil {
+		ar.Authorized = true
+		server.FinishAccessRequest(resp, req, ar)
+	}
+	if resp.IsError {
+		t.Fatalf("First refresh should not be an error")
+	}
+
+	// replaying the rotated token must be rejected...
+	resp2 := server.NewResponse()
+	req2 := newRefreshRequest()
+	if ar := server.HandleAccessRequest(resp2, req2); ar != nil {
+		ar.Authorized = true
+		server.FinishAccessRequest(resp2, req2, ar)
+	}
+	if !resp2.IsError || resp2.ErrorId != E_INVALID_GRANT {
+		t.Fatalf("Reused rotated token should fail with invalid_grant, got: %v", resp2.ErrorId)
+	}
+
+	// ...and the whole family, including the freshly issued token, must be revoked
+	if _, err := server.Storage.LoadRefresh("r1"); err == nil {
+		t.Fatalf("new refresh token was not revoked with the family")
+	}
+	if _, err := server.Storage.LoadAccess("1"); err == nil {
+		t.Fatalf("new access token was not revoked with the family")
+	}
+	if _, err := server.Storage.LoadRefresh("r9999"); err == nil {
+		t.Fatalf("replayed refresh token was not revoked with the family")
+	}
+}
+
+func TestRefreshTokenRotationConflict(t *testing.T) {
+	storage := NewTestingStorage()
+
+	// two concurrent refreshes of the same token: only the first sequence
+	// comparison may succeed
+	if err := storage.RotateRefresh("r9999", 0); err != nil {
+		t.Fatalf("first rotation should succeed: %s", err.Error())
+	}
+	if err := storage.RotateRefresh("r9999", 0); err != ErrRefreshTokenRotated {
+		t.Fatalf("second rotation should fail with ErrRefreshTokenRotated, got: %v", err)
+	}
+
+	storage.RemoveRefreshFamily("f9999")
+	if _, err := storage.LoadRefresh("r9999"); err == nil {
+		t.Fatalf("family was not revoked")
 	}
 }
 

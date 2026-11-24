@@ -2,14 +2,16 @@ package osin
 
 import (
 	"strconv"
+	"sync"
 	"time"
 )
 
 type TestingStorage struct {
+	mu        sync.Mutex
 	clients   map[string]Client
 	authorize map[string]*AuthorizeData
 	access    map[string]*AccessData
-	refresh   map[string]string
+	refresh   map[string]*AccessData
 }
 
 func NewTestingStorage() *TestingStorage {
@@ -17,7 +19,7 @@ func NewTestingStorage() *TestingStorage {
 		clients:   make(map[string]Client),
 		authorize: make(map[string]*AuthorizeData),
 		access:    make(map[string]*AccessData),
-		refresh:   make(map[string]string),
+		refresh:   make(map[string]*AccessData),
 	}
 
 	r.clients["1234"] = &DefaultClient{
@@ -48,16 +50,17 @@ func NewTestingStorage() *TestingStorage {
 	}
 
 	r.access["r9999"] = &AccessData{
-		Client:        r.clients["1234"],
-		AuthorizeData: r.authorize["9999"],
-		AccessData:    r.access["9999"],
-		AccessToken:   "9999",
-		RefreshToken:  "r9999",
-		ExpiresIn:     3600,
-		CreatedAt:     time.Now(),
+		Client:             r.clients["1234"],
+		AuthorizeData:      r.authorize["9999"],
+		AccessData:         r.access["9999"],
+		AccessToken:        "9999",
+		RefreshToken:       "r9999",
+		ExpiresIn:          3600,
+		CreatedAt:          time.Now(),
+		RefreshTokenFamily: "f9999",
 	}
 
-	r.refresh["r9999"] = "9999"
+	r.refresh["r9999"] = r.access["r9999"]
 
 	return r
 }
@@ -101,7 +104,7 @@ func (s *TestingStorage) RemoveAuthorize(code string) error {
 func (s *TestingStorage) SaveAccess(data *AccessData) error {
 	s.access[data.AccessToken] = data
 	if data.RefreshToken != "" {
-		s.refresh[data.RefreshToken] = data.AccessToken
+		s.refresh[data.RefreshToken] = data
 	}
 	return nil
 }
@@ -120,13 +123,46 @@ func (s *TestingStorage) RemoveAccess(code string) error {
 
 func (s *TestingStorage) LoadRefresh(code string) (*AccessData, error) {
 	if d, ok := s.refresh[code]; ok {
-		return s.LoadAccess(d)
+		return d, nil
 	}
 	return nil, ErrNotFound
 }
 
 func (s *TestingStorage) RemoveRefresh(code string) error {
 	delete(s.refresh, code)
+	return nil
+}
+
+func (s *TestingStorage) RotateRefresh(token string, sequence int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.refresh[token]
+	if !ok {
+		return ErrNotFound
+	}
+	if d.RefreshTokenRotated || d.RefreshTokenRotation != sequence {
+		return ErrRefreshTokenRotated
+	}
+	d.RefreshTokenRotated = true
+	return nil
+}
+
+func (s *TestingStorage) RemoveRefreshFamily(family string) error {
+	if family == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token, data := range s.refresh {
+		if data.RefreshTokenFamily == family {
+			delete(s.refresh, token)
+		}
+	}
+	for token, data := range s.access {
+		if data.RefreshTokenFamily == family {
+			delete(s.access, token)
+		}
+	}
 	return nil
 }
 

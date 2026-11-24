@@ -31,3 +31,8 @@ func (a *AccessTokenGenDefault) GenerateAccessToken(data *AccessData, generatere
 	}
 	return
 }
+
+// newRefreshTokenFamily generates a new refresh token family identifier
+func newRefreshTokenFamily() string {
+	return base64.RawURLEncoding.EncodeToString([]byte(uuid.NewRandom()))
+}
