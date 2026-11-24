@@ -252,6 +252,20 @@ func (s *Server) handleAuthorizationCodeRequest(w *Response, r *http.Request) *A
 		}
 	}
 
+	// Atomically mark the authorization code as redeemed before issuing any
+	// token. An authorization code is single use (RFC 6749 section 4.1.2):
+	// once redeemed it must never be accepted again. Removing it here, instead
+	// of after the tokens are saved, closes both the replay window and the
+	// race where two concurrent requests exchange the same code. A failure
+	// means the code is unknown, expired or already redeemed: reject the
+	// request. If token issuance fails afterwards, FinishAccessRequest restores
+	// the authorization data so the client can retry once within the code's
+	// original lifetime.
+	if err = w.Storage.RemoveAuthorize(ret.Code); err != nil {
+		s.setErrorAndLog(w, E_INVALID_GRANT, err, "auth_code_request=%s", "error marking authorization code as redeemed")
+		return nil
+	}
+
 	// set rest of data
 	ret.Scope = ret.AuthorizeData.Scope
 	ret.UserData = ret.AuthorizeData.UserData
@@ -481,6 +495,7 @@ func (s *Server) FinishAccessRequest(w *Response, r *http.Request, ar *AccessReq
 			// generate access token
 			ret.AccessToken, ret.RefreshToken, err = s.AccessTokenGen.GenerateAccessToken(ret, ar.GenerateRefresh)
 			if err != nil {
+				s.restoreAuthorizeData(w, ar)
 				s.setErrorAndLog(w, E_SERVER_ERROR, err, "finish_access_request=%s", "error generating token")
 				return
 			}
@@ -490,13 +505,9 @@ func (s *Server) FinishAccessRequest(w *Response, r *http.Request, ar *AccessReq
 
 		// save access token
 		if err = w.Storage.SaveAccess(ret); err != nil {
+			s.restoreAuthorizeData(w, ar)
 			s.setErrorAndLog(w, E_SERVER_ERROR, err, "finish_access_request=%s", "error saving access token")
 			return
-		}
-
-		// remove authorization token
-		if ret.AuthorizeData != nil {
-			w.Storage.RemoveAuthorize(ret.AuthorizeData.Code)
 		}
 
 		// remove previous access token
@@ -518,7 +529,26 @@ func (s *Server) FinishAccessRequest(w *Response, r *http.Request, ar *AccessReq
 			w.Output["scope"] = ret.Scope
 		}
 	} else {
+		// the code was claimed during request handling, give it back so the
+		// rejected request can be retried once before the code expires
+		s.restoreAuthorizeData(w, ar)
 		s.setErrorAndLog(w, E_ACCESS_DENIED, nil, "finish_access_request=%s", "authorization failed")
+	}
+}
+
+// restoreAuthorizeData re-saves the authorization data claimed in
+// handleAuthorizationCodeRequest. It implements the single replay window that
+// compensates for the claim and token issuance not sharing a transaction:
+// when token generation, token storage or authorization fails after the code
+// was marked as redeemed, the code is put back so the client can retry once,
+// bounded by the code's original expiration. Failures are logged but not
+// surfaced, since the response already carries the primary error.
+func (s *Server) restoreAuthorizeData(w *Response, ar *AccessRequest) {
+	if ar == nil || ar.Type != AUTHORIZATION_CODE || ar.AuthorizeData == nil {
+		return
+	}
+	if err := w.Storage.SaveAuthorize(ar.AuthorizeData); err != nil {
+		s.Logger.Printf("finish_access_request=error restoring authorization code, code=%s, internal_error=%#v", ar.AuthorizeData.Code, err)
 	}
 }
 

@@ -2,10 +2,12 @@ package osin
 
 import (
 	"strconv"
+	"sync"
 	"time"
 )
 
 type TestingStorage struct {
+	mu        sync.RWMutex
 	clients   map[string]Client
 	authorize map[string]*AuthorizeData
 	access    map[string]*AccessData
@@ -82,11 +84,15 @@ func (s *TestingStorage) SetClient(id string, client Client) error {
 }
 
 func (s *TestingStorage) SaveAuthorize(data *AuthorizeData) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.authorize[data.Code] = data
 	return nil
 }
 
 func (s *TestingStorage) LoadAuthorize(code string) (*AuthorizeData, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if d, ok := s.authorize[code]; ok {
 		return d, nil
 	}
@@ -94,11 +100,18 @@ func (s *TestingStorage) LoadAuthorize(code string) (*AuthorizeData, error) {
 }
 
 func (s *TestingStorage) RemoveAuthorize(code string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.authorize[code]; !ok {
+		return ErrNotFound
+	}
 	delete(s.authorize, code)
 	return nil
 }
 
 func (s *TestingStorage) SaveAccess(data *AccessData) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.access[data.AccessToken] = data
 	if data.RefreshToken != "" {
 		s.refresh[data.RefreshToken] = data.AccessToken
@@ -107,6 +120,8 @@ func (s *TestingStorage) SaveAccess(data *AccessData) error {
 }
 
 func (s *TestingStorage) LoadAccess(code string) (*AccessData, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if d, ok := s.access[code]; ok {
 		return d, nil
 	}
@@ -114,11 +129,15 @@ func (s *TestingStorage) LoadAccess(code string) (*AccessData, error) {
 }
 
 func (s *TestingStorage) RemoveAccess(code string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.access, code)
 	return nil
 }
 
 func (s *TestingStorage) LoadRefresh(code string) (*AccessData, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if d, ok := s.refresh[code]; ok {
 		return s.LoadAccess(d)
 	}
@@ -126,6 +145,8 @@ func (s *TestingStorage) LoadRefresh(code string) (*AccessData, error) {
 }
 
 func (s *TestingStorage) RemoveRefresh(code string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.refresh, code)
 	return nil
 }

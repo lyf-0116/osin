@@ -66,6 +66,9 @@ func (s *TestStorage) LoadAuthorize(code string) (*osin.AuthorizeData, error) {
 
 func (s *TestStorage) RemoveAuthorize(code string) error {
 	fmt.Printf("RemoveAuthorize: %s\n", code)
+	if _, ok := s.authorize[code]; !ok {
+		return osin.ErrNotFound
+	}
 	delete(s.authorize, code)
 	return nil
 }

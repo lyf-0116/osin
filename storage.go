@@ -34,7 +34,13 @@ type Storage interface {
 	// Optionally can return error if expired.
 	LoadAuthorize(code string) (*AuthorizeData, error)
 
-	// RemoveAuthorize revokes or deletes the authorization code.
+	// RemoveAuthorize revokes or deletes the authorization code. It is called
+	// atomically at the start of the authorization code exchange, before any
+	// token is issued, to mark the code as redeemed and make authorization
+	// codes single use. Implementations must make the removal atomic (e.g. a
+	// conditional delete) and return an error, typically ErrNotFound, when the
+	// code does not exist, has expired or was already redeemed; such an error
+	// rejects the exchange as invalid_grant and prevents code replay.
 	RemoveAuthorize(code string) error
 
 	// SaveAccess writes AccessData.
