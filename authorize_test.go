@@ -184,6 +184,46 @@ func TestAuthorizeCodePKCERequired(t *testing.T) {
 	}
 }
 
+func TestAuthorizeCodePKCERequiredByDefault(t *testing.T) {
+	for _, setEmptyChallenge := range []bool{false, true} {
+		name := "missing challenge"
+		if setEmptyChallenge {
+			name = "empty challenge"
+		}
+		t.Run(name, func(t *testing.T) {
+			sconfig := NewServerConfig()
+			sconfig.AllowedAuthorizeTypes = AllowedAuthorizeType{CODE}
+			server := NewServer(sconfig, NewTestingStorage())
+
+			resp := server.NewResponse()
+			req, err := http.NewRequest("GET", "http://localhost:14000/appauth", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Form = make(url.Values)
+			req.Form.Set("response_type", string(CODE))
+			req.Form.Set("state", "a")
+			req.Form.Set("client_id", "public-client")
+			if setEmptyChallenge {
+				req.Form.Set("code_challenge", "")
+			}
+
+			if ar := server.HandleAuthorizeRequest(resp, req); ar != nil {
+				ar.Authorized = true
+				server.FinishAuthorizeRequest(resp, req, ar)
+			}
+
+			if !resp.IsError || resp.ErrorId != E_INVALID_REQUEST {
+				t.Fatalf("Expected invalid_request, got %#v", resp)
+			}
+			description, _ := resp.Output["error_description"].(string)
+			if !strings.Contains(description, "code_challenge") {
+				t.Fatalf("Expected error description to mention code_challenge, got %q", description)
+			}
+		})
+	}
+}
+
 func TestAuthorizeCodePKCEPlain(t *testing.T) {
 	challenge := "12345678901234567890123456789012345678901234567890"
 

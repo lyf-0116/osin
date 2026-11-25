@@ -54,7 +54,9 @@ type ServerConfig struct {
 	// If true allows access request using GET, else only POST - default false
 	AllowGetAccessRequest bool
 
-	// Require PKCE for code flows for public OAuth clients - default false
+	// Require PKCE for code flows for public OAuth clients.
+	// NewServerConfig enables this by default; set it to false to allow
+	// legacy public clients to omit a code_challenge.
 	RequirePKCEForPublicClients bool
 
 	// Separator to support multiple URIs in Client.GetRedirectUri().
@@ -69,14 +71,15 @@ type ServerConfig struct {
 // NewServerConfig returns a new ServerConfig with default configuration
 func NewServerConfig() *ServerConfig {
 	return &ServerConfig{
-		AuthorizationExpiration:   250,
-		AccessExpiration:          3600,
-		TokenType:                 "Bearer",
-		AllowedAuthorizeTypes:     AllowedAuthorizeType{CODE},
-		AllowedAccessTypes:        AllowedAccessType{AUTHORIZATION_CODE},
-		ErrorStatusCode:           200,
-		AllowClientSecretInParams: false,
-		AllowGetAccessRequest:     false,
-		RetainTokenAfterRefresh:   false,
+		AuthorizationExpiration:     250,
+		AccessExpiration:            3600,
+		TokenType:                   "Bearer",
+		AllowedAuthorizeTypes:       AllowedAuthorizeType{CODE},
+		AllowedAccessTypes:          AllowedAccessType{AUTHORIZATION_CODE},
+		ErrorStatusCode:             200,
+		AllowClientSecretInParams:   false,
+		AllowGetAccessRequest:       false,
+		RequirePKCEForPublicClients: true,
+		RetainTokenAfterRefresh:     false,
 	}
 }
